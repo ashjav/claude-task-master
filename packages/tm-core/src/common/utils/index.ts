@@ -57,6 +57,15 @@ export {
 // Export path construction utilities
 export { getProjectPaths } from './path-helpers.js';
 
+// Export metadata sanitizer
+export {
+	sanitizeMetadata,
+	sanitizeMetadataString,
+	sanitizeTaskMetadata,
+	MetadataValidationError,
+	type MetadataSanitizeOptions
+} from './metadata-sanitizer.js';
+
 // Additional utility exports
 
 /**

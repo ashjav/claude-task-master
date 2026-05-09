@@ -226,7 +226,8 @@ describe('LoopService', () => {
 					prompt: 'default',
 					iterations: 1,
 					sleepSeconds: 0,
-					progressFile: '/test/progress.txt'
+					progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
 				});
 
 				expect(result.totalIterations).toBe(1);
@@ -248,7 +249,8 @@ describe('LoopService', () => {
 					prompt: 'default',
 					iterations: 3,
 					sleepSeconds: 0,
-					progressFile: '/test/progress.txt'
+					progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
 				});
 
 				expect(result.totalIterations).toBe(3);
@@ -270,7 +272,8 @@ describe('LoopService', () => {
 					prompt: 'default',
 					iterations: 1,
 					sleepSeconds: 0,
-					progressFile: '/test/progress.txt'
+					progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
 				});
 
 				expect(mockSpawnSync).toHaveBeenCalledWith(
@@ -298,7 +301,8 @@ describe('LoopService', () => {
 					prompt: 'default',
 					iterations: 5,
 					sleepSeconds: 0,
-					progressFile: '/test/progress.txt'
+					progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
 				});
 
 				expect(result.totalIterations).toBe(1);
@@ -319,7 +323,8 @@ describe('LoopService', () => {
 					prompt: 'default',
 					iterations: 5,
 					sleepSeconds: 0,
-					progressFile: '/test/progress.txt'
+					progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
 				});
 
 				expect(result.totalIterations).toBe(1);
@@ -342,7 +347,8 @@ describe('LoopService', () => {
 					prompt: 'default',
 					iterations: 1,
 					sleepSeconds: 0,
-					progressFile: '/test/progress.txt'
+					progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
 				});
 
 				expect(result.iterations[0].status).toBe('error');
@@ -363,7 +369,8 @@ describe('LoopService', () => {
 					prompt: 'default',
 					iterations: 1,
 					sleepSeconds: 0,
-					progressFile: '/test/progress.txt'
+					progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
 				});
 
 				expect(result.iterations[0].status).toBe('error');
@@ -385,15 +392,16 @@ describe('LoopService', () => {
 					prompt: 'default',
 					iterations: 1,
 					sleepSeconds: 0,
-					progressFile: '/test/progress.txt'
+					progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
 				});
 
-				expect(fsPromises.mkdir).toHaveBeenCalledWith('/test', {
+				expect(fsPromises.mkdir).toHaveBeenCalledWith('/test/project', {
 					recursive: true
 				});
 				// Uses appendFile instead of writeFile to preserve existing progress
 				expect(fsPromises.appendFile).toHaveBeenCalledWith(
-					'/test/progress.txt',
+					'/test/project/progress.txt',
 					expect.stringContaining('# Taskmaster Loop Progress'),
 					'utf-8'
 				);
@@ -413,11 +421,12 @@ describe('LoopService', () => {
 					prompt: 'default',
 					iterations: 2,
 					sleepSeconds: 0,
-					progressFile: '/test/progress.txt'
+					progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
 				});
 
 				expect(fsPromises.appendFile).toHaveBeenCalledWith(
-					'/test/progress.txt',
+					'/test/project/progress.txt',
 					expect.stringContaining('# Loop Complete'),
 					'utf-8'
 				);
@@ -439,7 +448,8 @@ describe('LoopService', () => {
 					prompt: 'test-coverage',
 					iterations: 1,
 					sleepSeconds: 0,
-					progressFile: '/test/progress.txt'
+					progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
 				});
 
 				// Verify spawn was called with prompt containing iteration info
@@ -466,7 +476,8 @@ describe('LoopService', () => {
 					prompt: '/custom/prompt.md',
 					iterations: 1,
 					sleepSeconds: 0,
-					progressFile: '/test/progress.txt'
+					progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
 				});
 
 				expect(fsPromises.readFile).toHaveBeenCalledWith(
@@ -483,7 +494,8 @@ describe('LoopService', () => {
 						prompt: '/custom/empty.md',
 						iterations: 1,
 						sleepSeconds: 0,
-						progressFile: '/test/progress.txt'
+						progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
 					})
 				).rejects.toThrow('empty');
 			});
@@ -670,7 +682,8 @@ describe('LoopService', () => {
 				prompt: 'default',
 				iterations: 1,
 				sleepSeconds: 0,
-				progressFile: '/test/progress.txt'
+				progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
 			});
 
 			expect(capturedIsRunning).toBe(true);
@@ -690,10 +703,105 @@ describe('LoopService', () => {
 				prompt: 'default',
 				iterations: 1,
 				sleepSeconds: 0,
-				progressFile: '/test/progress.txt'
+				progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
 			});
 
 			expect(service.isRunning).toBe(false);
+		});
+	});
+
+	describe('security gating (regression)', () => {
+		let service: LoopService;
+
+		beforeEach(() => {
+			service = new LoopService(defaultOptions);
+		});
+
+		it('refuses to run unsandboxed without bypassPermissionsAck', async () => {
+			const result = await service.run({
+				prompt: 'default',
+				iterations: 1,
+				sleepSeconds: 0,
+				progressFile: '/test/project/progress.txt'
+				// bypassPermissionsAck intentionally omitted
+			});
+
+			expect(result.finalStatus).toBe('error');
+			expect(result.errorMessage).toMatch(/dangerously-skip-permissions/);
+			// Must not have spawned anything when refusing
+			expect(mockSpawnSync).not.toHaveBeenCalled();
+		});
+
+		it('runs unsandboxed when bypassPermissionsAck is true', async () => {
+			mockSpawnSync.mockReturnValue({
+				stdout: '',
+				stderr: '',
+				status: 0,
+				signal: null,
+				pid: 123,
+				output: []
+			});
+
+			const result = await service.run({
+				prompt: 'default',
+				iterations: 1,
+				sleepSeconds: 0,
+				progressFile: '/test/project/progress.txt',
+				bypassPermissionsAck: true
+			});
+
+			expect(result.finalStatus).not.toBe('error');
+			expect(mockSpawnSync).toHaveBeenCalled();
+		});
+
+		it('rejects progressFile that escapes the project root via ..', async () => {
+			const result = await service.run({
+				prompt: 'default',
+				iterations: 1,
+				sleepSeconds: 0,
+				progressFile: '../../etc/cron.d/owned.txt',
+				bypassPermissionsAck: true
+			});
+
+			expect(result.finalStatus).toBe('error');
+			expect(result.errorMessage).toMatch(/progressFile/);
+			expect(mockSpawnSync).not.toHaveBeenCalled();
+		});
+
+		it('rejects absolute progressFile outside the project root', async () => {
+			const result = await service.run({
+				prompt: 'default',
+				iterations: 1,
+				sleepSeconds: 0,
+				progressFile: '/tmp/owned.txt',
+				bypassPermissionsAck: true
+			});
+
+			expect(result.finalStatus).toBe('error');
+			expect(result.errorMessage).toMatch(/progressFile/);
+			expect(mockSpawnSync).not.toHaveBeenCalled();
+		});
+
+		it('accepts a relative progressFile under the project root', async () => {
+			mockSpawnSync.mockReturnValue({
+				stdout: '',
+				stderr: '',
+				status: 0,
+				signal: null,
+				pid: 123,
+				output: []
+			});
+
+			const result = await service.run({
+				prompt: 'default',
+				iterations: 1,
+				sleepSeconds: 0,
+				progressFile: '.taskmaster/progress.txt',
+				bypassPermissionsAck: true
+			});
+
+			expect(result.finalStatus).not.toBe('error');
 		});
 	});
 });

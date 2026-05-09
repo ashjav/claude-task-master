@@ -8,7 +8,9 @@ import path from 'node:path';
 import {
 	LOCAL_ONLY_COMMANDS,
 	type LocalOnlyCommand,
-	createTmCore
+	MetadataValidationError,
+	createTmCore,
+	sanitizeTaskMetadata
 } from '@tm/core';
 import type { ContentResult, Context } from 'fastmcp';
 import packageJson from '../../../../package.json' with { type: 'json' };
@@ -453,7 +455,8 @@ export function withToolContext<TArgs extends { projectRoot?: string }>(
  */
 export function validateMcpMetadata(
 	metadataString: string | null | undefined,
-	errorResponseFn: (message: string) => ContentResult
+	errorResponseFn: (message: string) => ContentResult,
+	auditContext?: { tool: string; taskId?: string; log?: any }
 ): { parsedMetadata: Record<string, unknown> | null; error?: ContentResult } {
 	// Return null if no metadata provided
 	if (!metadataString) {
@@ -490,8 +493,29 @@ export function validateMcpMetadata(
 			};
 		}
 
-		return { parsedMetadata };
+		// Sanitize structure (strip control chars, enforce depth/size limits, reject
+		// non-plain objects). This is the only validation that runs on every
+		// metadata write from MCP - never trust the LLM-provided payload.
+		const sanitized = sanitizeTaskMetadata(parsedMetadata) ?? {};
+
+		// Always emit an audit record so an operator who has opted into metadata
+		// writes can review what was actually persisted via MCP. Logged regardless
+		// of debug flag — these are security-relevant state changes.
+		emitMetadataAudit({
+			tool: auditContext?.tool ?? 'unknown',
+			taskId: auditContext?.taskId,
+			keys: Object.keys(sanitized),
+			log: auditContext?.log
+		});
+
+		return { parsedMetadata: sanitized };
 	} catch (parseError: unknown) {
+		if (parseError instanceof MetadataValidationError) {
+			return {
+				parsedMetadata: null,
+				error: errorResponseFn(`Invalid metadata: ${parseError.message}`)
+			};
+		}
 		const message =
 			parseError instanceof Error ? parseError.message : 'Unknown parse error';
 		return {
@@ -500,5 +524,50 @@ export function validateMcpMetadata(
 				`Invalid metadata JSON: ${message}. Provide a valid JSON object string.`
 			)
 		};
+	}
+}
+
+/**
+ * Emit a structured audit line for every accepted metadata write through MCP.
+ * Goes to stderr to keep MCP stdout (which carries protocol traffic) clean and
+ * to the tool's logger when one is supplied.
+ */
+function emitMetadataAudit(record: {
+	tool: string;
+	taskId?: string;
+	keys: string[];
+	log?: any;
+}): void {
+	const line = `[metadata-audit] tool=${record.tool} taskId=${record.taskId ?? 'n/a'} keys=${JSON.stringify(record.keys)} ts=${new Date().toISOString()}`;
+	try {
+		record.log?.info?.(line);
+	} catch {
+		// audit must never break the request
+	}
+	try {
+		process.stderr.write(`${line}\n`);
+	} catch {
+		// stderr write failures are non-fatal
+	}
+}
+
+/**
+ * Sanitize a task object for return through MCP. Wraps the user-controlled
+ * metadata field through the central sanitizer so that ANSI escapes and
+ * unbounded structures cannot be smuggled back to the calling LLM.
+ */
+export function sanitizeTaskForMcp<T extends { metadata?: unknown }>(
+	task: T
+): T {
+	if (!task || task.metadata === undefined || task.metadata === null) {
+		return task;
+	}
+	try {
+		const cleaned = sanitizeTaskMetadata(task.metadata);
+		return { ...task, metadata: cleaned } as T;
+	} catch {
+		// On any sanitization failure, drop the metadata rather than serve raw
+		// untrusted content back to the LLM.
+		return { ...task, metadata: undefined } as T;
 	}
 }

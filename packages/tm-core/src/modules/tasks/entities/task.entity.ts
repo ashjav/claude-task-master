@@ -9,6 +9,10 @@ import type {
 	TaskPriority,
 	TaskStatus
 } from '../../../common/types/index.js';
+import {
+	MetadataValidationError,
+	sanitizeTaskMetadata
+} from '../../../common/utils/metadata-sanitizer.js';
 
 /**
  * Task entity representing a task with business logic
@@ -69,7 +73,17 @@ export class TaskEntity implements Task {
 		this.recommendedSubtasks = data.recommendedSubtasks;
 		this.expansionPrompt = data.expansionPrompt;
 		this.complexityReasoning = data.complexityReasoning;
-		this.metadata = data.metadata;
+		try {
+			this.metadata = sanitizeTaskMetadata(data.metadata);
+		} catch (err) {
+			if (err instanceof MetadataValidationError) {
+				throw new TaskMasterError(
+					`Invalid task metadata: ${err.message}`,
+					ERROR_CODES.VALIDATION_ERROR
+				);
+			}
+			throw err;
+		}
 	}
 
 	/**

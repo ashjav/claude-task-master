@@ -27,6 +27,7 @@ export interface LoopCommandOptions {
 	sandbox?: boolean;
 	output?: boolean;
 	verbose?: boolean;
+	yesDangerouslySkipPermissions?: boolean;
 }
 
 export class LoopCommand extends Command {
@@ -58,6 +59,10 @@ export class LoopCommand extends Command {
 				'Exclude full Claude output from iteration results'
 			)
 			.option('-v, --verbose', "Show Claude's work in real-time")
+			.option(
+				'--yes-dangerously-skip-permissions',
+				'Acknowledge that running without --sandbox passes --dangerously-skip-permissions to Claude (required for unsandboxed loops)'
+			)
 			.action((options: LoopCommandOptions) => this.execute(options));
 	}
 
@@ -132,6 +137,8 @@ export class LoopCommand extends Command {
 				includeOutput: options.output ?? true,
 				verbose: options.verbose ?? false,
 				brief: briefName,
+				bypassPermissionsAck:
+					options.yesDangerouslySkipPermissions ?? false,
 				callbacks: this.createOutputCallbacks()
 			};
 

@@ -3,6 +3,7 @@
  * Utility functions for the Task Master CLI
  */
 
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
@@ -17,6 +18,97 @@ import { getDebugFlag, getLogLevel } from './config-manager.js';
 // Import FileOperations from tm-core for atomic file modifications
 import { FileOperations } from '@tm/core';
 import * as gitUtils from './utils/git-utils.js';
+
+/**
+ * Check if a process with the given PID is still alive.
+ * Used to invalidate stale lockfiles whose owner has died.
+ *
+ * `process.kill(pid, 0)` does not actually deliver a signal — it only performs
+ * the permission/existence check that signal delivery would. ESRCH means no
+ * such process; EPERM means the process exists but is owned by another user
+ * (still counts as alive for our purposes).
+ *
+ * @param {number} pid
+ * @returns {boolean} true if the process exists, false otherwise
+ */
+function isProcessAlive(pid) {
+	if (!Number.isInteger(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err) {
+		// EPERM = process exists but signal not permitted; treat as alive
+		return err && err.code === 'EPERM';
+	}
+}
+
+/**
+ * Read the PID from a lockfile, returning null if unreadable or malformed.
+ * Used to decide whether a stale-by-time lock can be taken over: if the
+ * recorded PID is dead we can claim it; if it's alive we must wait.
+ */
+function readLockPid(lockPath) {
+	try {
+		const content = fs.readFileSync(lockPath, 'utf8');
+		const parsed = JSON.parse(content);
+		const pid = Number(parsed?.pid);
+		return Number.isInteger(pid) && pid > 0 ? pid : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Derive a lockfile path from a target file path, refusing inputs that would
+ * place the lock outside the resolved parent directory of the target. This
+ * blocks `..`-style traversal and rejects symlinked lockfiles.
+ *
+ * @param {string} filepath - The file being locked
+ * @returns {string} Absolute path of the lockfile to use
+ */
+function deriveLockPath(filepath) {
+	if (typeof filepath !== 'string' || filepath.length === 0) {
+		throw new Error('lock target must be a non-empty path string');
+	}
+	const resolved = path.resolve(filepath);
+	const parent = path.dirname(resolved);
+	const lockPath = path.resolve(parent, `${path.basename(resolved)}.lock`);
+	if (path.dirname(lockPath) !== parent) {
+		throw new Error(
+			`refusing to derive lock path outside target directory: ${filepath}`
+		);
+	}
+	// If a lockfile already exists as a symlink, refuse to operate on it: a
+	// later open()/stat() would follow it to an attacker-controlled target.
+	try {
+		const st = fs.lstatSync(lockPath);
+		if (st.isSymbolicLink()) {
+			throw new Error(
+				`refusing to use symlinked lockfile: ${lockPath}`
+			);
+		}
+	} catch (err) {
+		if (err && err.code !== 'ENOENT') {
+			throw err;
+		}
+	}
+	return lockPath;
+}
+
+/**
+ * Build an unpredictable temp-file path for atomic write-then-rename. Using
+ * `pid + crypto random` makes the path unguessable so an attacker who can
+ * write into the parent directory cannot pre-plant a symlink at the temp
+ * path to redirect the write.
+ *
+ * @param {string} filepath - Target file (for sibling temp placement)
+ * @returns {string} Absolute path for the temp file
+ */
+function buildAtomicTempPath(filepath) {
+	const resolved = path.resolve(filepath);
+	const suffix = `${process.pid}.${crypto.randomBytes(8).toString('hex')}`;
+	return `${resolved}.tmp.${suffix}`;
+}
 
 // Global silent mode flag
 let silentMode = false;
@@ -98,7 +190,7 @@ async function withFileLock(filepath, callback, options = {}) {
 		}
 	}
 
-	const lockPath = `${filepath}.lock`;
+	const lockPath = deriveLockPath(filepath);
 	const { maxRetries, retryDelay, staleLockAge } = LOCK_CONFIG;
 
 	// Try to acquire lock with retries
@@ -115,18 +207,27 @@ async function withFileLock(filepath, callback, options = {}) {
 			break;
 		} catch (err) {
 			if (err.code === 'EEXIST') {
-				// Lock file exists - check if it's stale
+				// Lock file exists - check if it's stale. We require BOTH the
+				// mtime to be old AND the recorded PID to be dead before taking
+				// over: relying on mtime alone lets an attacker plant an old-dated
+				// lockfile to trick a victim writer into deleting a real lock.
 				try {
-					const lockStat = await fsPromises.stat(lockPath);
+					const lockStat = await fsPromises.lstat(lockPath);
+					if (lockStat.isSymbolicLink()) {
+						throw new Error(
+							`refusing to operate on symlinked lockfile: ${lockPath}`
+						);
+					}
 					const age = Date.now() - lockStat.mtimeMs;
-					if (age > staleLockAge) {
-						// Stale lock - use atomic rename to safely take ownership
-						// This prevents race where we delete another process's fresh lock
-						const stalePath = `${lockPath}.stale.${process.pid}.${Date.now()}`;
+					const lockOwnerPid = readLockPid(lockPath);
+					const ownerDead =
+						lockOwnerPid === null || !isProcessAlive(lockOwnerPid);
+					if (age > staleLockAge && ownerDead) {
+						// Stale lock with a dead owner - take ownership via atomic
+						// rename. Rename loser races just retry naturally.
+						const stalePath = `${lockPath}.stale.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}`;
 						try {
 							await fsPromises.rename(lockPath, stalePath);
-							// We successfully took ownership of the stale lock
-							// Clean it up and retry immediately
 							try {
 								await fsPromises.unlink(stalePath);
 							} catch {
@@ -212,7 +313,7 @@ function withFileLockSync(filepath, callback, options = {}) {
 		}
 	}
 
-	const lockPath = `${filepath}.lock`;
+	const lockPath = deriveLockPath(filepath);
 	const { maxRetries, retryDelay, staleLockAge } = LOCK_CONFIG;
 
 	// Try to acquire lock with retries
@@ -229,18 +330,27 @@ function withFileLockSync(filepath, callback, options = {}) {
 			break;
 		} catch (err) {
 			if (err.code === 'EEXIST') {
-				// Lock file exists - check if it's stale
+				// Lock file exists - check if it's stale. We require BOTH the
+				// mtime to be old AND the recorded PID to be dead before taking
+				// over: relying on mtime alone lets an attacker plant an old-dated
+				// lockfile to trick a victim writer into deleting a real lock.
 				try {
-					const lockStat = fs.statSync(lockPath);
+					const lockStat = fs.lstatSync(lockPath);
+					if (lockStat.isSymbolicLink()) {
+						throw new Error(
+							`refusing to operate on symlinked lockfile: ${lockPath}`
+						);
+					}
 					const age = Date.now() - lockStat.mtimeMs;
-					if (age > staleLockAge) {
-						// Stale lock - use atomic rename to safely take ownership
-						// This prevents race where we delete another process's fresh lock
-						const stalePath = `${lockPath}.stale.${process.pid}.${Date.now()}`;
+					const lockOwnerPid = readLockPid(lockPath);
+					const ownerDead =
+						lockOwnerPid === null || !isProcessAlive(lockOwnerPid);
+					if (age > staleLockAge && ownerDead) {
+						// Stale lock with a dead owner - take ownership via atomic
+						// rename. Rename loser races just retry naturally.
+						const stalePath = `${lockPath}.stale.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}`;
 						try {
 							fs.renameSync(lockPath, stalePath);
-							// We successfully took ownership of the stale lock
-							// Clean it up and retry immediately
 							try {
 								fs.unlinkSync(stalePath);
 							} catch {
@@ -1154,14 +1264,17 @@ function writeJSON(filepath, data, projectRoot = null, tag = null) {
 					}
 				}
 
-				// Use atomic write: write to temp file then rename
-				// This prevents partial writes from corrupting the file
-				const tempPath = `${filepath}.tmp.${process.pid}`;
+				// Use atomic write: write to temp file then rename. The temp
+				// path includes random bytes so an attacker who can write into
+				// the parent dir cannot pre-plant a symlink at a predictable
+				// path to redirect this write. The 'wx' flag refuses to follow
+				// any pre-existing path (symlink or otherwise).
+				const tempPath = buildAtomicTempPath(filepath);
 				try {
 					fs.writeFileSync(
 						tempPath,
 						JSON.stringify(cleanData, null, 2),
-						'utf8'
+						{ encoding: 'utf8', flag: 'wx' }
 					);
 					fs.renameSync(tempPath, filepath);
 				} catch (writeError) {
