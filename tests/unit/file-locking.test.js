@@ -593,3 +593,94 @@ describe('Lock file stale detection', () => {
 		expect(result).toBe('acquired');
 	});
 });
+
+describe('Lock file hardening (regression)', () => {
+	let tempDir;
+	let testFilePath;
+	let utils;
+
+	beforeEach(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskmaster-lockharden-'));
+		testFilePath = path.join(tempDir, 'tasks.json');
+		fs.writeFileSync(testFilePath, '{}');
+		utils = await import(utilsPath + `?cachebust=${Date.now()}`);
+	});
+
+	afterEach(() => {
+		if (tempDir && fs.existsSync(tempDir)) {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it('refuses to take over a stale-by-time lock whose PID is still alive', () => {
+		const lockPath = `${testFilePath}.lock`;
+		// Plant a lockfile that is old by mtime (looks stale) but records the
+		// PID of the current test process (definitely alive). Pre-fix, the
+		// mtime check alone would let a victim writer delete this lock.
+		fs.writeFileSync(
+			lockPath,
+			JSON.stringify({ pid: process.pid, timestamp: Date.now() - 60000 })
+		);
+		const old = new Date(Date.now() - 60000);
+		fs.utimesSync(lockPath, old, old);
+
+		// We expect the call to time out / throw rather than steal the live lock.
+		expect(() =>
+			utils.withFileLockSync(testFilePath, () => 'should not run')
+		).toThrow(/Failed to acquire lock/);
+
+		// And the real lock must still be there for its rightful owner.
+		expect(fs.existsSync(lockPath)).toBe(true);
+	});
+
+	it('refuses to operate on a symlinked lockfile', () => {
+		const lockPath = `${testFilePath}.lock`;
+		const decoy = path.join(tempDir, 'decoy.txt');
+		fs.writeFileSync(decoy, 'attacker-controlled');
+		// Plant a symlink at the lockfile location pointing somewhere unrelated.
+		fs.symlinkSync(decoy, lockPath);
+
+		expect(() =>
+			utils.withFileLockSync(testFilePath, () => 'unreachable')
+		).toThrow(/symlink|lock/i);
+	});
+
+	it('writeJSON uses an unguessable temp file path', () => {
+		// Spy on fs.writeFileSync to capture the temp path actually used.
+		const originalWriteFileSync = fs.writeFileSync;
+		const tempPaths = [];
+		try {
+			fs.writeFileSync = (p, ...rest) => {
+				if (typeof p === 'string' && p.includes('.tmp.')) {
+					tempPaths.push(p);
+				}
+				return originalWriteFileSync(p, ...rest);
+			};
+
+			utils.writeJSON(testFilePath, { hello: 'world' });
+
+			expect(tempPaths.length).toBeGreaterThan(0);
+			// Pre-fix this was `${filepath}.tmp.${process.pid}`. We require at
+			// least 8 hex chars beyond the PID so an attacker cannot pre-plant
+			// a symlink at a guessable path.
+			const tempPath = tempPaths[tempPaths.length - 1];
+			expect(tempPath).toMatch(
+				new RegExp(
+					`${path
+						.basename(testFilePath)
+						.replace(/\./g, '\\.')}\\.tmp\\.${process.pid}\\.[0-9a-f]{16}$`
+				)
+			);
+		} finally {
+			fs.writeFileSync = originalWriteFileSync;
+		}
+	});
+
+	it('writeJSON does not leave a temp file behind on success', () => {
+		utils.writeJSON(testFilePath, { ok: true });
+		const leftovers = fs
+			.readdirSync(tempDir)
+			.filter((name) => name.includes('.tmp.'));
+		expect(leftovers).toEqual([]);
+	});
+});

@@ -342,4 +342,34 @@ describe('TaskEntity', () => {
 			expect(entity.metadata).toEqual({ tracked: true });
 		});
 	});
+
+	describe('metadata sanitization (security)', () => {
+		it('strips ANSI escape sequences from string values on construction', () => {
+			const task = createMinimalTask({
+				metadata: { label: '\x1b[31mfake error\x1b[0m' }
+			});
+			const entity = new TaskEntity(task);
+			expect(entity.metadata?.label).not.toContain('\x1b');
+		});
+
+		it('rejects non-object top-level metadata', () => {
+			const task = createMinimalTask({
+				metadata: ['not', 'a', 'plain', 'object'] as unknown as Record<
+					string,
+					unknown
+				>
+			});
+			expect(() => new TaskEntity(task)).toThrow(/Invalid task metadata/);
+		});
+
+		it('rejects metadata with function values', () => {
+			const task = createMinimalTask({
+				metadata: { evil: (() => 'boom') as unknown } as Record<
+					string,
+					unknown
+				>
+			});
+			expect(() => new TaskEntity(task)).toThrow(/Invalid task metadata/);
+		});
+	});
 });

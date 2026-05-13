@@ -6,6 +6,7 @@
 import { z } from 'zod';
 import {
 	handleApiResult,
+	sanitizeTaskForMcp,
 	withToolContext
 } from '../../shared/utils.js';
 import type { ToolContext } from '../../shared/types.js';
@@ -106,11 +107,21 @@ export function registerGetTasksTool(server: FastMCP) {
 							? ((subtaskCounts.done || 0) / subtaskCounts.total) * 100
 							: 0;
 
+					// Sanitize user-controlled metadata before returning to the LLM.
+					// Stops ANSI escapes / oversized blobs / prompt injection bait
+					// from flowing back through MCP tool results.
+					const sanitizedTasks = (tasks as Task[]).map((task) =>
+						sanitizeTaskForMcp({
+							...task,
+							subtasks: task.subtasks?.map((st) => sanitizeTaskForMcp(st))
+						})
+					);
+
 					return handleApiResult({
 						result: {
 							success: true,
 							data: {
-								tasks: tasks as Task[],
+								tasks: sanitizedTasks,
 								filter: status || 'all',
 								stats: {
 									total: totalTasks,

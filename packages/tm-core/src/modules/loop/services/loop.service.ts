@@ -126,6 +126,43 @@ export class LoopService {
 			};
 		}
 
+		// Refuse to start an unsandboxed run unless the caller has explicitly
+		// acknowledged the permission bypass. CLI mode passes
+		// `--dangerously-skip-permissions` to Claude, which removes every safety
+		// prompt — combined with arbitrary task/metadata content this is a
+		// privileged execution sink and must be opt-in.
+		if (!config.sandbox && !config.bypassPermissionsAck) {
+			const errorMsg =
+				'Refusing to run loop in CLI mode: --dangerously-skip-permissions would be passed to Claude. ' +
+				'Re-run with --sandbox for Docker isolation, or pass --yes-dangerously-skip-permissions to ' +
+				'acknowledge that the spawned Claude can use any tool unattended.';
+			this.reportError(config.callbacks, errorMsg);
+			return {
+				iterations: [],
+				totalIterations: 0,
+				tasksCompleted: 0,
+				finalStatus: 'error',
+				errorMessage: errorMsg
+			};
+		}
+
+		// Validate that the progress file resolves under the project root. The
+		// loop appends to this path on every iteration; an unconstrained value
+		// (e.g. ../../etc/cron.d/foo) is a write primitive on the host.
+		try {
+			config.progressFile = this.resolveProgressFile(config.progressFile);
+		} catch (err) {
+			const errorMsg = err instanceof Error ? err.message : String(err);
+			this.reportError(config.callbacks, errorMsg);
+			return {
+				iterations: [],
+				totalIterations: 0,
+				tasksCompleted: 0,
+				finalStatus: 'error',
+				errorMessage: errorMsg
+			};
+		}
+
 		this._isRunning = true;
 		const iterations: LoopIteration[] = [];
 		let tasksCompleted = 0;
@@ -215,6 +252,29 @@ export class LoopService {
 		} else {
 			this.logger.error(message);
 		}
+	}
+
+	/**
+	 * Resolve and validate a user-supplied progress file path. Refuses absolute
+	 * paths and any relative path that escapes the project root via `..`. The
+	 * loop appends to this file every iteration; an unconstrained value would
+	 * be a write primitive on the host (e.g. ~/.bashrc, ~/.ssh/authorized_keys).
+	 */
+	private resolveProgressFile(progressFile: string): string {
+		if (typeof progressFile !== 'string' || progressFile.length === 0) {
+			throw new Error('progressFile must be a non-empty string');
+		}
+		const root = path.resolve(this.projectRoot);
+		const candidate = path.isAbsolute(progressFile)
+			? path.resolve(progressFile)
+			: path.resolve(root, progressFile);
+		const rel = path.relative(root, candidate);
+		if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+			throw new Error(
+				`progressFile must resolve under the project root (got: ${progressFile})`
+			);
+		}
+		return candidate;
 	}
 
 	private async initProgressFile(config: LoopConfig): Promise<void> {

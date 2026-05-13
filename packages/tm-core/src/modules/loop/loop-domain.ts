@@ -194,6 +194,7 @@ export class LoopDomain {
 			includeOutput: partial.includeOutput ?? false,
 			verbose: partial.verbose ?? false,
 			brief: partial.brief,
+			bypassPermissionsAck: partial.bypassPermissionsAck ?? false,
 			callbacks: partial.callbacks
 		};
 	}

@@ -84,6 +84,16 @@ export interface LoopConfig {
 	 */
 	brief?: string;
 	/**
+	 * Caller acknowledgement that running the loop in CLI mode (i.e. without
+	 * `sandbox=true`) will pass `--dangerously-skip-permissions` to the spawned
+	 * Claude CLI.
+	 *
+	 * Must be set explicitly for unsandboxed runs; otherwise the service refuses
+	 * to start. Sandbox runs ignore this flag because Docker isolation makes the
+	 * permission bypass safe.
+	 */
+	bypassPermissionsAck?: boolean;
+	/**
 	 * Output callbacks for presentation layer (CLI/MCP).
 	 * If not provided, the service runs silently (no console output).
 	 */
